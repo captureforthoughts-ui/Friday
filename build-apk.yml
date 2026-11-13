@@ -1,0 +1,70 @@
+name: Build Friday APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # If the files were uploaded all loose in one folder, put each one where it belongs first.
+      - name: Arrange files
+        run: |
+          place() { if [ -f "$1" ]; then mkdir -p "$(dirname "$2")"; mv -f "$1" "$2"; echo "moved $1"; fi; }
+          place app-build.gradle.kts app/build.gradle.kts
+          place root-build.gradle.kts build.gradle.kts
+          place friday-debug.keystore app/friday-debug.keystore
+          place AndroidManifest.xml app/src/main/AndroidManifest.xml
+          place standalone.html app/src/main/assets/standalone.html
+          for f in BootReceiver CallService FridayAccessibilityService Guard ListeningService MainActivity PhoneControl; do
+            place "$f.kt" "app/src/main/java/app/friday/phone/$f.kt"
+          done
+          place banner.png app/src/main/res/drawable-xhdpi/banner.png
+          place ic_launcher.png app/src/main/res/mipmap-xxhdpi/ic_launcher.png
+          place strings.xml app/src/main/res/values/strings.xml
+          place styles.xml app/src/main/res/values/styles.xml
+          place accessibility_config.xml app/src/main/res/xml/accessibility_config.xml
+          rm -f "build.gradle (1).kts" "gradle (1).properties" "settings.gradle (1).kts"
+          find . -maxdepth 3 -not -path './.git*' -type f | sort
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # The build machine already has the Android SDK. Only accept its licences.
+      - name: Accept Android licences
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # The fixed signing key keeps updates installing over the old app. If the file is missing or unreadable, make one so the build still works.
+      - name: Check the signing key
+        run: |
+          if ! keytool -list -keystore app/friday-debug.keystore -storepass android >/dev/null 2>&1; then
+            echo "::warning::friday-debug.keystore missing or unreadable, making a new one"
+            rm -f app/friday-debug.keystore
+            keytool -genkeypair -keystore app/friday-debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 36500 -dname "CN=Friday,O=Friday,C=SG"
+          fi
+
+      - name: Build the APK
+        run: |
+          set +e
+          gradle assembleDebug --no-daemon --console=plain > build.log 2>&1
+          code=$?
+          if [ $code -ne 0 ]; then
+            msg=$(grep -E -A12 "What went wrong|^e: |error:" build.log | head -30 | tr '\n' '|')
+            echo "::error title=Build failed::$msg"
+            tail -60 build.log
+          fi
+          exit $code
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Friday-APK
+          path: app/build/outputs/apk/debug/app-debug.apk
